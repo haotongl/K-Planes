@@ -5,6 +5,7 @@ build/
 *.egg-info/
 data/
 logs/
+logs
 *.json
 tensorRF/
 *.zip
