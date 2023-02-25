@@ -60,7 +60,8 @@ class LLFFDataset(BaseDataset):
             bbox = torch.tensor([[-2., -2., -2.], [2., 2., 2.]])
             self.near_fars = near_fars
         else:
-            bbox = torch.tensor([[-1.5, -1.67, -1.], [1.5, 1.67, 1.]])
+            # bbox = torch.tensor([[-1.5, -1.67, -1.], [1.5, 1.67, 1.]])
+            bbox = torch.tensor([[-2.1, -1.67, -1.], [2.1, 1.67, 1.]])
             self.near_fars = torch.tensor([[0.0, self.ndc_far]]).repeat(num_images, 1)
 
         # These are used when contraction=True
