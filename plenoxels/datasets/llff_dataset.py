@@ -30,6 +30,7 @@ class LLFFDataset(BaseDataset):
             raise ValueError("LLFF dataset expects either contraction or NDC to be enabled.")
         self.downsample = downsample
         self.hold_every = hold_every
+        log.info(f"hold_every: {hold_every}.")
         self.near_scaling = near_scaling
         self.ndc_far = ndc_far
 
@@ -60,7 +61,7 @@ class LLFFDataset(BaseDataset):
             bbox = torch.tensor([[-2., -2., -2.], [2., 2., 2.]])
             self.near_fars = near_fars
         else:
-            bbox = torch.tensor([[-1.5, -1.67, -1.], [1.5, 1.67, 1.]])
+            bbox = torch.tensor([[-2.1, -1.67, -1.], [2.1, 1.67, 1.]])
             self.near_fars = torch.tensor([[0.0, self.ndc_far]]).repeat(num_images, 1)
 
         # These are used when contraction=True
@@ -180,7 +181,7 @@ def load_llff_images(image_paths: List[str], intrinsics: Intrinsics, split: str)
     all_rgbs: List[torch.Tensor] = parallel_load_images(
         tqdm_title=f'Loading {split} data',
         dset_type='llff',
-        data_dir='/',  # paths from glob are absolute
+        data_dir='.',  # paths from glob are absolute
         num_images=len(image_paths),
         paths=image_paths,
         out_h=intrinsics.height,

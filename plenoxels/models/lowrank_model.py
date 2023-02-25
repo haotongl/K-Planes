@@ -83,7 +83,7 @@ class LowrankModel(nn.Module):
             num_images=num_images,
         )
 
-        # Initialize proposal-sampling nets
+        # # Initialize proposal-sampling nets
         self.density_fns = []
         self.num_proposal_iterations = num_proposal_iterations
         self.proposal_net_args_list = proposal_net_args_list
@@ -93,41 +93,43 @@ class LowrankModel(nn.Module):
         self.proposal_weights_anneal_max_num_iters = proposal_weights_anneal_max_num_iters
         self.proposal_weights_anneal_slope = proposal_weights_anneal_slope
         self.proposal_networks = torch.nn.ModuleList()
-        if use_same_proposal_network:
-            assert len(self.proposal_net_args_list) == 1, "Only one proposal network is allowed."
-            prop_net_args = self.proposal_net_args_list[0]
-            network = KPlaneDensityField(
-                aabb, spatial_distortion=self.spatial_distortion,
-                density_activation=self.density_act, linear_decoder=self.linear_decoder, **prop_net_args)
-            self.proposal_networks.append(network)
-            self.density_fns.extend([network.get_density for _ in range(self.num_proposal_iterations)])
-        else:
-            for i in range(self.num_proposal_iterations):
-                prop_net_args = self.proposal_net_args_list[min(i, len(self.proposal_net_args_list) - 1)]
-                network = KPlaneDensityField(
-                    aabb, spatial_distortion=self.spatial_distortion,
-                    density_activation=self.density_act, linear_decoder=self.linear_decoder, **prop_net_args,
-                )
-                self.proposal_networks.append(network)
-            self.density_fns.extend([network.get_density for network in self.proposal_networks])
+        # if use_same_proposal_network:
+        #     assert len(self.proposal_net_args_list) == 1, "Only one proposal network is allowed."
+        #     prop_net_args = self.proposal_net_args_list[0]
+        #     network = KPlaneDensityField(
+        #         aabb, spatial_distortion=self.spatial_distortion,
+        #         density_activation=self.density_act, linear_decoder=self.linear_decoder, **prop_net_args)
+        #     self.proposal_networks.append(network)
+        #     self.density_fns.extend([network.get_density for _ in range(self.num_proposal_iterations)])
+        # else:
+        #     for i in range(self.num_proposal_iterations):
+        #         prop_net_args = self.proposal_net_args_list[min(i, len(self.proposal_net_args_list) - 1)]
+        #         network = KPlaneDensityField(
+        #             aabb, spatial_distortion=self.spatial_distortion,
+        #             density_activation=self.density_act, linear_decoder=self.linear_decoder, **prop_net_args,
+        #         )
+        #         self.proposal_networks.append(network)
+        #     self.density_fns.extend([network.get_density for network in self.proposal_networks])
 
-        update_schedule = lambda step: np.clip(
-            np.interp(step, [0, self.proposal_warmup], [0, self.proposal_update_every]),
-            1,
-            self.proposal_update_every,
-        )
+        # update_schedule = lambda step: np.clip(
+        #     np.interp(step, [0, self.proposal_warmup], [0, self.proposal_update_every]),
+        #     1,
+        #     self.proposal_update_every,
+        # )
         if self.is_contracted or self.is_ndc:
             initial_sampler = UniformLinDispPiecewiseSampler(single_jitter=single_jitter)
         else:
             initial_sampler = UniformSampler(single_jitter=single_jitter)
-        self.proposal_sampler = ProposalNetworkSampler(
-            num_nerf_samples_per_ray=num_samples,
-            num_proposal_samples_per_ray=num_proposal_samples,
-            num_proposal_network_iterations=self.num_proposal_iterations,
-            single_jitter=single_jitter,
-            update_sched=update_schedule,
-            initial_sampler=initial_sampler
-        )
+        self.proposal_sampler = initial_sampler
+
+        # ProposalNetworkSampler(
+        #     num_nerf_samples_per_ray=num_samples,
+        #     num_proposal_samples_per_ray=num_proposal_samples,
+        #     num_proposal_network_iterations=self.num_proposal_iterations,
+        #     single_jitter=single_jitter,
+        #     update_sched=update_schedule,
+        #     initial_sampler=initial_sampler
+        # )
 
     def step_before_iter(self, step):
         if self.use_proposal_weight_anneal:
@@ -137,11 +139,12 @@ class LowrankModel(nn.Module):
             train_frac = np.clip(step / N, 0, 1)
             bias = lambda x, b: (b * x) / ((b - 1) * x + 1)
             anneal = bias(train_frac, self.proposal_weights_anneal_slope)
-            self.proposal_sampler.set_anneal(anneal)
+            # self.proposal_sampler.set_anneal(anneal)
 
     def step_after_iter(self, step):
         if self.use_proposal_weight_anneal:
-            self.proposal_sampler.step_cb(step)
+            pass
+            # self.proposal_sampler.step_cb(step)
 
     @staticmethod
     def render_rgb(rgb: torch.Tensor, weights: torch.Tensor, bg_color: Optional[torch.Tensor]):
@@ -184,8 +187,9 @@ class LowrankModel(nn.Module):
         #       since the appearance embedding should not affect density. We still pass them in the
         #       call below, but they will not be used as long as density-field resolutions
         #       are be 3D.
-        ray_samples, weights_list, ray_samples_list = self.proposal_sampler.generate_ray_samples(
-            ray_bundle, timestamps=timestamps, density_fns=self.density_fns)
+        weights_list, ray_samples_list = [], []
+        ray_samples = self.proposal_sampler.generate_ray_samples(
+            ray_bundle, num_samples=256)
 
         field_out = self.field(ray_samples.get_positions(), ray_bundle.directions, timestamps)
         rgb, density = field_out["rgb"], field_out["density"]
