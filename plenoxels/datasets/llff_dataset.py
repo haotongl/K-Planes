@@ -181,7 +181,7 @@ def load_llff_images(image_paths: List[str], intrinsics: Intrinsics, split: str)
     all_rgbs: List[torch.Tensor] = parallel_load_images(
         tqdm_title=f'Loading {split} data',
         dset_type='llff',
-        data_dir='/',  # paths from glob are absolute
+        data_dir='.',  # paths from glob are absolute
         num_images=len(image_paths),
         paths=image_paths,
         out_h=intrinsics.height,
