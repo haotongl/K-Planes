@@ -6,6 +6,10 @@ import os
 import time
 from collections import defaultdict
 from typing import Optional, List, Tuple, Any, Dict
+from os.path import join
+from tqdm import tqdm
+import imageio
+import cv2
 
 import numpy as np
 import torch
@@ -20,6 +24,22 @@ from .ray_utils import (
 from .synthetic_nerf_dataset import (
     load_360_images, load_360_intrinsics,
 )
+
+
+def get_bound_corners(bounds):
+    min_x, min_y, min_z = bounds[0]
+    max_x, max_y, max_z = bounds[1]
+    corners_3d = np.array([
+        [min_x, min_y, min_z],
+        [min_x, min_y, max_z],
+        [min_x, max_y, min_z],
+        [min_x, max_y, max_z],
+        [max_x, min_y, min_z],
+        [max_x, min_y, max_z],
+        [max_x, max_y, min_z],
+        [max_x, max_y, max_z],
+    ])
+    return corners_3d
 
 
 class Video360Dataset(BaseDataset):
@@ -57,163 +77,68 @@ class Video360Dataset(BaseDataset):
         self.median_imgs = None
         if contraction and ndc:
             raise ValueError("Options 'contraction' and 'ndc' are exclusive.")
-        if "lego" in datadir or "dnerf" in datadir:
+        if "lego" in datadir or "dnerf" in datadir or 'nhr' in datadir:
             dset_type = "synthetic"
         else:
             dset_type = "llff"
 
+        self.split = split
         # Note: timestamps are stored normalized between -1, 1.
-        if dset_type == "llff":
-            if split == "render":
-                assert ndc, "Unable to generate render poses without ndc: don't know near-far."
-                per_cam_poses, per_cam_near_fars, intrinsics, _ = load_llffvideo_poses(
-                    datadir, downsample=self.downsample, split='all', near_scaling=self.near_scaling)
-                render_poses = generate_spiral_path(
-                    per_cam_poses.numpy(), per_cam_near_fars.numpy(), n_frames=300,
-                    n_rots=2, zrate=0.5, dt=self.near_scaling, percentile=60)
-                self.poses = torch.from_numpy(render_poses).float()
-                self.per_cam_near_fars = torch.tensor([[0.4, self.ndc_far]])
-                timestamps = torch.linspace(0, 299, len(self.poses))
-                imgs = None
-            else:
-                per_cam_poses, per_cam_near_fars, intrinsics, videopaths = load_llffvideo_poses(
-                    datadir, downsample=self.downsample, split=split, near_scaling=self.near_scaling)
-                if split == 'test':
-                    keyframes = False
-                poses, imgs, timestamps, self.median_imgs = load_llffvideo_data(
-                    videopaths=videopaths, cam_poses=per_cam_poses, intrinsics=intrinsics,
-                    split=split, keyframes=keyframes, keyframes_take_each=30)
-                self.poses = poses.float()
-                if contraction:
-                    self.per_cam_near_fars = per_cam_near_fars.float()
-                else:
-                    self.per_cam_near_fars = torch.tensor(
-                        [[0.0, self.ndc_far]]).repeat(per_cam_near_fars.shape[0], 1)
-            # These values are tuned for the salmon video
-            self.global_translation = torch.tensor([0, 0, 2.])
-            self.global_scale = torch.tensor([0.5, 0.6, 1])
-            # Normalize timestamps between -1, 1
-            timestamps = (timestamps.float() / 299) * 2 - 1
-        elif dset_type == "synthetic":
-            assert not contraction, "Synthetic video dataset does not work with contraction."
-            assert not ndc, "Synthetic video dataset does not work with NDC."
-            if split == 'render':
-                num_tsteps = 120
-                dnerf_durations = {'hellwarrior': 100, 'mutant': 150, 'hook': 100, 'bouncingballs': 150, 'lego': 50, 'trex': 200, 'standup': 150, 'jumpingjacks': 200}
-                for scene in dnerf_durations.keys():
-                    if 'dnerf' in datadir and scene in datadir:
-                        num_tsteps = dnerf_durations[scene]
-                render_poses = torch.stack([
-                    generate_spherical_poses(angle, -30.0, 4.0)
-                    for angle in np.linspace(-180, 180, num_tsteps + 1)[:-1]
-                ], 0)
-                imgs = None
-                self.poses = render_poses
-                timestamps = torch.linspace(0.0, 1.0, render_poses.shape[0])
-                _, transform = load_360video_frames(
-                    datadir, 'train', max_cameras=self.max_cameras, max_tsteps=self.max_tsteps)
-                img_h, img_w = 800, 800
-            else:
-                frames, transform = load_360video_frames(
-                    datadir, split, max_cameras=self.max_cameras, max_tsteps=self.max_tsteps)
-                imgs, self.poses = load_360_images(frames, datadir, split, self.downsample)
-                timestamps = torch.tensor(
-                    [fetch_360vid_info(f)[0] for f in frames], dtype=torch.float32)
-                img_h, img_w = imgs[0].shape[:2]
-            if ndc:
-                self.per_cam_near_fars = torch.tensor([[0.0, self.ndc_far]])
-            else:
-                self.per_cam_near_fars = torch.tensor([[2.0, 6.0]])
-            if "dnerf" in datadir:
-                # dnerf time is between 0, 1. Normalize to -1, 1
-                timestamps = timestamps * 2 - 1
-            else:
-                # lego (our vid) time is like dynerf: between 0, 30.
-                timestamps = (timestamps.float() / torch.amax(timestamps)) * 2 - 1
-            intrinsics = load_360_intrinsics(
-                transform, img_h=img_h, img_w=img_w, downsample=self.downsample)
-        else:
-            raise ValueError(datadir)
-
-        self.timestamps = timestamps
+        # self.name = 'sport_1_easymocap'
+        self.name = datadir.split('/')[-1]
+        self.annots = np.load(join(datadir, 'annots_new.npy'), allow_pickle=True).item()
+        frame_len = 200
         if split == 'train':
-            self.timestamps = self.timestamps[:, None, None].repeat(
-                1, intrinsics.height, intrinsics.width).reshape(-1)  # [n_frames * h * w]
-        assert self.timestamps.min() >= -1.0 and self.timestamps.max() <= 1.0, "timestamps out of range."
-        if imgs is not None and imgs.dtype != torch.uint8:
-            imgs = (imgs * 255).to(torch.uint8)
-        if self.median_imgs is not None and self.median_imgs.dtype != torch.uint8:
-            self.median_imgs = (self.median_imgs * 255).to(torch.uint8)
-        if split == 'train':
-            imgs = imgs.view(-1, imgs.shape[-1])
-        elif imgs is not None:
-            imgs = imgs.view(-1, intrinsics.height * intrinsics.width, imgs.shape[-1])
-
-        # ISG/IST weights are computed on 4x subsampled data.
-        weights_subsampled = int(4 / downsample)
-        if scene_bbox is not None:
-            scene_bbox = torch.tensor(scene_bbox)
+            cams = np.arange(1, len(self.annots['ixts']))
         else:
-            scene_bbox = get_bbox(datadir, is_contracted=contraction, dset_type=dset_type)
-        super().__init__(
-            datadir=datadir,
-            split=split,
-            batch_size=batch_size,
-            is_ndc=ndc,
-            is_contracted=contraction,
-            scene_bbox=scene_bbox,
-            rays_o=None,
-            rays_d=None,
-            intrinsics=intrinsics,
-            imgs=imgs,
-            sampling_weights=None,  # Start without importance sampling, by default
-            weights_subsampled=weights_subsampled,
-        )
+            cams = np.arange(0, 1)
 
-        self.isg_weights = None
-        self.ist_weights = None
-        if split == "train" and dset_type == 'llff':  # Only use importance sampling with DyNeRF videos
-            if os.path.exists(os.path.join(datadir, f"isg_weights.pt")):
-                self.isg_weights = torch.load(os.path.join(datadir, f"isg_weights.pt"))
-                log.info(f"Reloaded {self.isg_weights.shape[0]} ISG weights from file.")
-            else:
-                # Precompute ISG weights
-                t_s = time.time()
-                gamma = 1e-3 if self.keyframes else 2e-2
-                self.isg_weights = dynerf_isg_weight(
-                    imgs.view(-1, intrinsics.height, intrinsics.width, imgs.shape[-1]),
-                    median_imgs=self.median_imgs, gamma=gamma)
-                # Normalize into a probability distribution, to speed up sampling
-                self.isg_weights = (self.isg_weights.reshape(-1) / torch.sum(self.isg_weights))
-                torch.save(self.isg_weights, os.path.join(datadir, f"isg_weights.pt"))
-                t_e = time.time()
-                log.info(f"Computed {self.isg_weights.shape[0]} ISG weights in {t_e - t_s:.2f}s.")
-
-            if os.path.exists(os.path.join(datadir, f"ist_weights.pt")):
-                self.ist_weights = torch.load(os.path.join(datadir, f"ist_weights.pt"))
-                log.info(f"Reloaded {self.ist_weights.shape[0]} IST weights from file.")
-            else:
-                # Precompute IST weights
-                t_s = time.time()
-                self.ist_weights = dynerf_ist_weight(
-                    imgs.view(-1, self.img_h, self.img_w, imgs.shape[-1]),
-                    num_cameras=self.median_imgs.shape[0])
-                # Normalize into a probability distribution, to speed up sampling
-                self.ist_weights = (self.ist_weights.reshape(-1) / torch.sum(self.ist_weights))
-                torch.save(self.ist_weights, os.path.join(datadir, f"ist_weights.pt"))
-                t_e = time.time()
-                log.info(f"Computed {self.ist_weights.shape[0]} IST weights in {t_e - t_s:.2f}s.")
-
-        if self.isg:
-            self.enable_isg()
-
+        H, W = 768, 1024
+        rs = 1. / downsample
+        H, W = int(H*rs), int(W*rs)
+        X, Y = np.meshgrid(np.arange(W), np.arange(H))
+        Z = np.ones_like(X)
+        XYZ = np.stack([X, Y, Z], axis=-1)
+        self.imgs, self.timestamps, self.ray_ds, self.cam_ids, self.near_fars = \
+                [], [], [], [], []
+        for cam in tqdm(cams):
+            ext = self.annots['exts'][cam]
+            ixt = self.annots['ixts'][cam].copy()
+            if rs != 1.:
+                ixt[:2] *= rs
+            for frame_id in range(frame_len):
+                img = imageio.imread(join(datadir, 'images', '{:04d}'.format(cam), '{:06d}.jpg'.format(frame_id)))
+                msk = imageio.imread(join(datadir, 'mask', '{:04d}'.format(cam), '{:06d}.png'.format(frame_id)))
+                img[msk==0] = 0.
+                img = cv2.resize(img, None, fx=rs, fy=rs, interpolation=cv2.INTER_AREA)
+                self.imgs.append(img)
+                # self.imgs = np.concatenate([self.imgs, img[None]], axis=0)
+                self.timestamps.append(frame_id/frame_len * 2. - 1.)
+                self.cam_ids.append(cam)
+                # near, far
+                points = get_bound_corners(self.annots['bboxs'][frame_id]) @ ext[:3, :3].T + ext[:3, 3:].T
+                self.near_fars.append([max(points[..., 2].min(), 0.05), points[..., 2].max()])
+                ray_d = XYZ @ np.linalg.inv(ixt.T) @ np.linalg.inv(ext[:3, :3].T)
+                self.ray_ds.append(ray_d.astype(np.float32))
+                # self.ray_ds = np.concatenate([self.ray_ds, ray_d[None].astype(np.float32)], axis=0)
+        self.imgs = np.array(self.imgs)
+        self.ray_ds = np.array(self.ray_ds)
+        self.cam_ids = np.array(self.cam_ids)
+        self.near_fars = np.array(self.near_fars).astype(np.float32)
+        self.timestamps = np.array(self.timestamps).astype(np.float32)
+        self.is_contracted = False
+        self.is_ndc = False
+        self.datadir = datadir
+        self.poses = np.linalg.inv(self.annots['exts']).astype(np.float32)
+        self.img_h_ = H
+        self.img_w_ = W
+        self.scene_bbox = torch.tensor(np.array(scene_bbox).astype(np.float32))
+        self.sampling_weights = None
+        self.use_permutation = True
+        self.num_samples = len(self.imgs) * self.img_h_ * self.img_w_
+        self.batch_size = batch_size
         log.info(f"VideoDataset contracted={self.is_contracted}, ndc={self.is_ndc}. "
-                 f"Loaded {self.split} set from {self.datadir}: "
-                 f"{len(self.poses)} images of size {self.img_h}x{self.img_w}. "
-                 f"Images loaded: {self.imgs is not None}. "
-                 f"{len(torch.unique(timestamps))} timestamps. Near-far: {self.per_cam_near_fars}. "
-                 f"ISG={self.isg}, IST={self.ist}, weights_subsampled={self.weights_subsampled}. "
-                 f"Sampling without replacement={self.use_permutation}. {intrinsics}")
+                 f"Loaded {self.split} set from {self.datadir}: ")
 
     def enable_isg(self):
         self.isg = True
@@ -228,72 +153,36 @@ class Video360Dataset(BaseDataset):
         log.info(f"Switched from ISG to IST weights.")
 
     def __getitem__(self, index):
-        h = self.intrinsics.height
-        w = self.intrinsics.width
-        dev = "cpu"
+        h, w = self.img_h_, self.img_w_
+        coords = np.stack(np.meshgrid(np.arange(0, w), np.arange(0, h)), -1)
+
         if self.split == 'train':
-            index = self.get_rand_ids(index)  # [batch_size // (weights_subsampled**2)]
-            if self.weights_subsampled == 1 or self.sampling_weights is None:
-                # Nothing special to do, either weights_subsampled = 1, or not using weights.
-                image_id = torch.div(index, h * w, rounding_mode='floor')
-                y = torch.remainder(index, h * w).div(w, rounding_mode='floor')
-                x = torch.remainder(index, h * w).remainder(w)
-            else:
-                # We must deal with the fact that ISG/IST weights are computed on a dataset with
-                # different 'downsampling' factor. E.g. if the weights were computed on 4x
-                # downsampled data and the current dataset is 2x downsampled, `weights_subsampled`
-                # will be 4 / 2 = 2.
-                # Split each subsampled index into its 16 components in 2D.
-                hsub, wsub = h // self.weights_subsampled, w // self.weights_subsampled
-                image_id = torch.div(index, hsub * wsub, rounding_mode='floor')
-                ysub = torch.remainder(index, hsub * wsub).div(wsub, rounding_mode='floor')
-                xsub = torch.remainder(index, hsub * wsub).remainder(wsub)
-                # xsub, ysub is the first point in the 4x4 square of finely sampled points
-                x, y = [], []
-                for ah in range(self.weights_subsampled):
-                    for aw in range(self.weights_subsampled):
-                        x.append(xsub * self.weights_subsampled + aw)
-                        y.append(ysub * self.weights_subsampled + ah)
-                x = torch.cat(x)
-                y = torch.cat(y)
-                image_id = image_id.repeat(self.weights_subsampled ** 2)
-                # Inverse of the process to get x, y from index. image_id stays the same.
-                index = x + y * w + image_id * h * w
-            x, y = x + 0.5, y + 0.5
+            coords = coords.reshape(-1, 2)
+            select_inds = np.random.choice(coords.shape[0], size=[self.batch_size], replace=True)
+            coords = coords[select_inds]
+            img_ids = np.random.choice(len(self.imgs), size=[self.batch_size], replace=True)
+            coords = np.concatenate([coords, img_ids[..., None]], axis=-1)
+
+            rays_d = self.ray_ds[coords[..., 2], coords[..., 1], coords[..., 0]]
+            rgb = self.imgs[coords[..., 2], coords[..., 1], coords[..., 0]]
+            cam_ids = self.cam_ids[coords[..., 2]]
+            rays_o = self.poses[:, :3, 3][cam_ids]
+            near_fars = self.near_fars[coords[..., 2]]
+            timestamps = self.timestamps[coords[..., 2]]
+
+            out = {'timestamps': timestamps}
+            out.update({'imgs': (rgb / 255.).astype(np.float32), 'rays_o': rays_o, 'rays_d': rays_d, 'near_fars': near_fars})
+            bg_color = np.zeros((1, 3), dtype=np.float32)
+            out.update({'bg_color': bg_color})
         else:
-            image_id = [index]
-            x, y = create_meshgrid(height=h, width=w, dev=dev, add_half=True, flat=True)
-
-        out = {
-            "timestamps": self.timestamps[index],      # (num_rays or 1, )
-            "imgs": None,
-        }
-        if self.split == 'train':
-            num_frames_per_camera = len(self.imgs) // (len(self.per_cam_near_fars) * h * w)
-            camera_id = torch.div(image_id, num_frames_per_camera, rounding_mode='floor')  # (num_rays)
-            out['near_fars'] = self.per_cam_near_fars[camera_id, :]
-        else:
-            out['near_fars'] = self.per_cam_near_fars  # Only one test camera
-
-        if self.imgs is not None:
-            out['imgs'] = (self.imgs[index] / 255.0).view(-1, self.imgs.shape[-1])
-
-        c2w = self.poses[image_id]                                    # [num_rays or 1, 3, 4]
-        camera_dirs = stack_camera_dirs(x, y, self.intrinsics, True)  # [num_rays, 3]
-        out['rays_o'], out['rays_d'] = get_rays(
-            camera_dirs, c2w, ndc=self.is_ndc, ndc_near=1.0, intrinsics=self.intrinsics,
-            normalize_rd=True)                                        # [num_rays, 3]
-
-        imgs = out['imgs']
-        # Decide BG color
-        bg_color = torch.ones((1, 3), dtype=torch.float32, device=dev)
-        if self.split == 'train' and imgs.shape[-1] == 4:
-            bg_color = torch.rand((1, 3), dtype=torch.float32, device=dev)
-        out['bg_color'] = bg_color
-        # Alpha compositing
-        if imgs is not None and imgs.shape[-1] == 4:
-            imgs = imgs[:, :3] * imgs[:, 3:] + bg_color * (1.0 - imgs[:, 3:])
-        out['imgs'] = imgs
+            out = {}
+            out['imgs'] = torch.tensor((self.imgs[index].reshape(-1, 3) / 255.).astype(np.float32))
+            out['timestamps'] = torch.tensor(self.timestamps[index])
+            out['near_fars'] = torch.tensor(self.near_fars[index:index+1])
+            out['rays_o'] = torch.tensor(self.poses[index, :3, 3][None].repeat(len(out['imgs']), 0))
+            out['rays_d'] = torch.tensor(self.ray_ds[index].reshape(-1, 3))
+            bg_color = torch.zeros((1, 3))
+            out.update({'bg_color': bg_color})
 
         return out
 

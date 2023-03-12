@@ -58,12 +58,14 @@ class BaseDataset(Dataset, ABC):
 
     @property
     def img_h(self) -> Union[int, List[int]]:
+        return self.img_h_
         if isinstance(self.intrinsics, list):
             return [i.height for i in self.intrinsics]
         return self.intrinsics.height
 
     @property
     def img_w(self) -> Union[int, List[int]]:
+        return self.img_w_
         if isinstance(self.intrinsics, list):
             return [i.width for i in self.intrinsics]
         return self.intrinsics.width

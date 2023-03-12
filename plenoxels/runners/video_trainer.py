@@ -209,6 +209,7 @@ def init_tr_data(data_downsample, data_dir, **kwargs):
     g.manual_seed(0)
     tr_loader = torch.utils.data.DataLoader(
         tr_dset, batch_size=None, num_workers=4,  prefetch_factor=4, pin_memory=True,
+        # tr_dset, batch_size=None, num_workers=0, pin_memory=True,
         worker_init_fn=init_dloader_random, generator=g)
     return {"tr_loader": tr_loader, "tr_dset": tr_dset}
 
