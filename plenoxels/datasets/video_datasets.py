@@ -135,8 +135,8 @@ class Video360Dataset(BaseDataset):
         self.scene_bbox = torch.tensor(np.array(scene_bbox).astype(np.float32))
         self.sampling_weights = None
         self.use_permutation = True
-        self.num_samples = len(self.imgs) * self.img_h_ * self.img_w_
         self.batch_size = batch_size
+        self.num_samples = len(self.imgs) * self.batch_size if self.split == 'train' else len(self.imgs)
         log.info(f"VideoDataset contracted={self.is_contracted}, ndc={self.is_ndc}. "
                  f"Loaded {self.split} set from {self.datadir}: ")
 
