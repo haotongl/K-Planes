@@ -61,7 +61,8 @@ class Video360Dataset(BaseDataset):
                  ndc: bool = False,
                  scene_bbox: Optional[List] = None,
                  near_scaling: float = 0.9,
-                 ndc_far: float = 2.6):
+                 ndc_far: float = 2.6,
+                 rand_bkgd: bool = False):
         self.keyframes = keyframes
         self.max_cameras = max_cameras
         self.max_tsteps = max_tsteps
@@ -101,6 +102,8 @@ class Video360Dataset(BaseDataset):
         XYZ = np.stack([X, Y, Z], axis=-1)
         self.imgs, self.timestamps, self.ray_ds, self.cam_ids, self.near_fars = \
                 [], [], [], [], []
+        if rand_bkgd:
+            self.msks = []
         for cam in tqdm(cams):
             ext = self.annots['exts'][cam]
             ixt = self.annots['ixts'][cam].copy()
@@ -109,8 +112,12 @@ class Video360Dataset(BaseDataset):
             for frame_id in range(frame_len):
                 img = imageio.imread(join(datadir, 'images', '{:04d}'.format(cam), '{:06d}.jpg'.format(frame_id)))
                 msk = imageio.imread(join(datadir, 'mask', '{:04d}'.format(cam), '{:06d}.png'.format(frame_id)))
+                msk = (np.logical_or(np.logical_or((msk[..., 0] != 0), msk[..., 1] != 0), msk[..., 2] != 0)).astype(np.uint8)
                 img[msk==0] = 0.
                 img = cv2.resize(img, None, fx=rs, fy=rs, interpolation=cv2.INTER_AREA)
+                if rand_bkgd:
+                    msk = cv2.resize(msk, None, fx=rs, fy=rs, interpolation=cv2.INTER_NEAREST)
+                    self.msks.append(msk)
                 self.imgs.append(img)
                 # self.imgs = np.concatenate([self.imgs, img[None]], axis=0)
                 self.timestamps.append(frame_id/frame_len * 2. - 1.)
@@ -122,6 +129,8 @@ class Video360Dataset(BaseDataset):
                 self.ray_ds.append(ray_d.astype(np.float32))
                 # self.ray_ds = np.concatenate([self.ray_ds, ray_d[None].astype(np.float32)], axis=0)
         self.imgs = np.array(self.imgs)
+        if rand_bkgd:
+            self.msks = np.array(self.msks)
         self.ray_ds = np.array(self.ray_ds)
         self.cam_ids = np.array(self.cam_ids)
         self.near_fars = np.array(self.near_fars).astype(np.float32)
@@ -137,6 +146,7 @@ class Video360Dataset(BaseDataset):
         self.use_permutation = True
         self.batch_size = batch_size
         self.num_samples = len(self.imgs) * self.batch_size if self.split == 'train' else len(self.imgs)
+        self.rand_bkgd = rand_bkgd
         log.info(f"VideoDataset contracted={self.is_contracted}, ndc={self.is_ndc}. "
                  f"Loaded {self.split} set from {self.datadir}: ")
 
@@ -164,22 +174,26 @@ class Video360Dataset(BaseDataset):
             coords = np.concatenate([coords, img_ids[..., None]], axis=-1)
 
             rays_d = self.ray_ds[coords[..., 2], coords[..., 1], coords[..., 0]]
-            rgb = self.imgs[coords[..., 2], coords[..., 1], coords[..., 0]]
+            rgb = (self.imgs[coords[..., 2], coords[..., 1], coords[..., 0]] / 255).astype(np.float32)
             cam_ids = self.cam_ids[coords[..., 2]]
             rays_o = self.poses[:, :3, 3][cam_ids]
             near_fars = self.near_fars[coords[..., 2]]
             timestamps = self.timestamps[coords[..., 2]]
-
-            out = {'timestamps': timestamps}
-            out.update({'imgs': (rgb / 255.).astype(np.float32), 'rays_o': rays_o, 'rays_d': rays_d, 'near_fars': near_fars})
             bg_color = np.zeros((1, 3), dtype=np.float32)
+            if self.rand_bkgd:
+                bg_color = np.random.random((1, 3)).astype(np.float32)
+                msk = self.msks[coords[..., 2], coords[..., 1], coords[..., 0]]
+                rgb[msk==0] = bg_color
+            out = {'timestamps': timestamps}
+            out.update({'imgs': rgb, 'rays_o': rays_o, 'rays_d': rays_d, 'near_fars': near_fars})
             out.update({'bg_color': bg_color})
         else:
             out = {}
             out['imgs'] = torch.tensor((self.imgs[index].reshape(-1, 3) / 255.).astype(np.float32))
             out['timestamps'] = torch.tensor(self.timestamps[index])
             out['near_fars'] = torch.tensor(self.near_fars[index:index+1])
-            out['rays_o'] = torch.tensor(self.poses[index, :3, 3][None].repeat(len(out['imgs']), 0))
+            cam_id = self.cam_ids[index]
+            out['rays_o'] = torch.tensor(self.poses[cam_id, :3, 3][None].repeat(len(out['imgs']), 0))
             out['rays_d'] = torch.tensor(self.ray_ds[index].reshape(-1, 3))
             bg_color = torch.zeros((1, 3))
             out.update({'bg_color': bg_color})

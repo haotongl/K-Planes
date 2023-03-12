@@ -1,5 +1,5 @@
 config = {
- 'expname': 'nhr_hybrid',
+ 'expname': 'nhr_hybrid_debug',
  'logdir': './logs/nhrdynamic',
  'device': 'cuda:0',
 
